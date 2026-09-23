@@ -1,0 +1,247 @@
+# VENDORED COPY of 0451-software/reusable-workflows/.github/workflows/terraform-apply.yml@v1
+# Source SHA at vendoring time: 3ae595435ed80af1bc44bf654189fc66d4e50b28
+#
+# This file is a vendored snapshot of the upstream reusable workflow. It was copied into
+# the caller repo because 0451-software/reusable-workflows is PRIVATE, and this caller
+# repo (openclaw-aws-terraform-starter) is PUBLIC. GitHub Actions does not let a public
+# caller resolve a reusable workflow hosted in a private repo; the run schedules 0 jobs
+# and fails with "workflow was not found". Vendoring into the public repo own
+# .github/workflows/ tree and calling it via uses: ./.github/workflows/_reusable-terraform-apply.yml
+# resolves this cleanly.
+#
+# When reusable-workflows upstream changes, re-vendor by copying the new version and
+# bumping the source SHA note above.
+# Terraform Apply (Reusable).
+#
+# Design contract: docs/design/reusable-workflow-api.md §2.3.2.
+#
+# Run `terraform apply -auto-approve` against a configured backend.
+#
+# Caller wiring — note the caller drives BOTH the dispatch AND the
+# environment gate. `secrets: inherit` is appropriate here because the
+# caller is already declaring the production environment, and the
+# workflow genuinely needs every secret the caller has (see
+# docs/design/reusable-workflow-api.md §2.3.2 "Note on secrets: inherit"):
+#
+#   on:
+#     push:
+#       branches: [main]
+#     workflow_dispatch:
+#
+#   jobs:
+#     apply:
+#       environment: production        # required — gates the manual approval
+#       uses: 0451-software/reusable-workflows/.github/workflows/terraform-apply.yml@v1
+#       with:
+#         working_directory: terraform
+#         terraform_version: "~1.6"
+#         environment: production      # forwarded to the workflow's `environment:` block
+#       secrets: inherit
+#
+# Why a `secrets: inherit` caller here is on purpose:
+# the design contract calls out (§1.7) that `secrets: inherit` is reserved
+# for the rare case where the workflow genuinely needs the full caller set.
+# `terraform-apply` is one of those: every secret declared on the
+# workflow side (AWS_ROLE_ARN, AWS_REGION, ORG_PAT, NAME_SUFFIX,
+# OPERATOR_IP, EC2_KEY_NAME, OPENCLAW_DOMAIN, HOSTED_ZONE_NAME,
+# BUDGET_ALERT_EMAIL) is read at apply time, and adding them by name on
+# the caller side doubles every secret-list audit across the org.
+
+name: Terraform Apply (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: Directory containing Terraform configuration.
+        type: string
+        default: "terraform"
+      terraform_version:
+        description: Terraform version constraint (passed to setup-terraform).
+        type: string
+        default: "~1.6"
+      project_name:
+        description: Project name passed as terraform var (project_name).
+        type: string
+        default: "openclaw"
+      aws_region_default:
+        description: Default AWS region if AWS_REGION secret is not set.
+        type: string
+        default: "us-east-2"
+      name_suffix_placeholder:
+        description: Placeholder string in main.tf to replace with resource_name_suffix.
+        type: string
+        default: "YOURSUFFIX"
+      project_name_placeholder:
+        description: Placeholder string in main.tf to replace with project_name.
+        type: string
+        default: "YOURPROJECTNAME"
+      resource_name_suffix:
+        description: |
+          Unique suffix for globally unique resource names (S3 buckets, etc.).
+          Falls back to the NAME_SUFFIX org secret.
+        type: string
+        default: ""
+      app_subdomain:
+        description: Primary domain/subdomain for this app (e.g. garrettsutula.com).
+        type: string
+        default: ""
+      hosted_zone_name:
+        description: Route53 hosted zone name (e.g. garrettsutula.com).
+        type: string
+        default: ""
+      operator_ip:
+        description: Operator IP address for security group rules. Falls back to OPERATOR_IP secret.
+        type: string
+        default: ""
+      ec2_key_name:
+        description: EC2 key pair name. Falls back to EC2_KEY_NAME secret.
+        type: string
+        default: ""
+      budget_alert_email:
+        description: Email address for AWS budget alerts. Falls back to BUDGET_ALERT_EMAIL secret.
+        type: string
+        default: ""
+      backend_bucket:
+        description: Override S3 backend bucket (passed as -backend-config).
+        type: string
+        default: ""
+      environment:
+        description: |
+          GitHub environment name used to gate apply with the
+          environment-protection rules. Defaults to "production" to match
+          the org's existing convention.
+        type: string
+        default: "production"
+
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+        description: OIDC role ARN for AWS access (aws-actions/configure-aws-credentials).
+      AWS_REGION:
+        required: false
+        description: AWS region; falls back to inputs.aws_region_default.
+      ORG_PAT:
+        required: false
+        description: GitHub PAT for cloning private Terraform modules.
+      NAME_SUFFIX:
+        required: false
+        description: Default for inputs.resource_name_suffix.
+      OPERATOR_IP:
+        required: false
+        description: Default for inputs.operator_ip.
+      EC2_KEY_NAME:
+        required: false
+        description: Default for inputs.ec2_key_name.
+      OPENCLAW_DOMAIN:
+        required: false
+        description: Default for inputs.app_subdomain.
+      HOSTED_ZONE_NAME:
+        required: false
+        description: Default for inputs.hosted_zone_name.
+      BUDGET_ALERT_EMAIL:
+        required: false
+        description: Default for inputs.budget_alert_email.
+
+# Apply does not post a PR comment, so no `pull-requests: write` needed.
+# `id-token: write` is required for the OIDC AWS credential exchange.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  apply:
+    name: terraform apply
+    runs-on: ubuntu-latest
+
+    # GitHub environment gate — requires a matching environment to exist
+    # in the caller repo's settings, with at least one required reviewer.
+    # See docs/secrets-and-environments.md for the protection rules.
+    environment:
+      name: ${{ inputs.environment }}
+
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION || inputs.aws_region_default }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Substitute backend name_suffix
+        run: |
+          SUFFIX="${{ inputs.resource_name_suffix }}"
+          if [ -z "$SUFFIX" ]; then SUFFIX="${{ secrets.NAME_SUFFIX }}"; fi
+          if [ -n "$SUFFIX" ]; then
+            sed -i "s/${{ inputs.name_suffix_placeholder }}/${SUFFIX}/g" main.tf
+          fi
+
+      - name: Substitute backend project_name
+        run: |
+          PLACEHOLDER="${{ inputs.project_name_placeholder }}"
+          PROJECT="${{ inputs.project_name }}"
+          if [ -n "$PLACEHOLDER" ] && [ -n "$PROJECT" ]; then
+            sed -i "s/${PLACEHOLDER}/${PROJECT}/g" main.tf
+          fi
+
+      - name: Configure git credentials for private modules
+        run: |
+          git config --global url."https://oauth2:${{ secrets.ORG_PAT }}@github.com".insteadOf "https://github.com"
+
+      - name: Terraform Init
+        run: |
+          BUCKET="${{ inputs.backend_bucket }}"
+          if [ -n "$BUCKET" ]; then
+            terraform init -backend-config="bucket=$BUCKET"
+          else
+            terraform init
+          fi
+
+      - name: Terraform Apply
+        run: |
+          EXTRA_ARGS=""
+
+          OPERATOR_IP="${{ inputs.operator_ip }}"
+          [ -z "$OPERATOR_IP" ] && OPERATOR_IP="${{ secrets.OPERATOR_IP }}"
+          [ -n "$OPERATOR_IP" ] && EXTRA_ARGS="$EXTRA_ARGS -var=my_ip=$OPERATOR_IP"
+
+          [ -n "${{ inputs.project_name }}" ] && EXTRA_ARGS="$EXTRA_ARGS -var=project_name=${{ inputs.project_name }}"
+
+          SUFFIX="${{ inputs.resource_name_suffix }}"
+          [ -z "$SUFFIX" ] && SUFFIX="${{ secrets.NAME_SUFFIX }}"
+          [ -n "$SUFFIX" ] && EXTRA_ARGS="$EXTRA_ARGS -var=name_suffix=$SUFFIX"
+
+          EC2_KEY="${{ inputs.ec2_key_name }}"
+          [ -z "$EC2_KEY" ] && EC2_KEY="${{ secrets.EC2_KEY_NAME }}"
+          [ -n "$EC2_KEY" ] && EXTRA_ARGS="$EXTRA_ARGS -var=key_name=$EC2_KEY"
+
+          DOMAIN="${{ inputs.app_subdomain }}"
+          [ -z "$DOMAIN" ] && DOMAIN="${{ secrets.OPENCLAW_DOMAIN }}"
+          [ -n "$DOMAIN" ] && EXTRA_ARGS="$EXTRA_ARGS -var=domain=$DOMAIN"
+
+          HZ="${{ inputs.hosted_zone_name }}"
+          [ -z "$HZ" ] && HZ="${{ secrets.HOSTED_ZONE_NAME }}"
+          [ -n "$HZ" ] && EXTRA_ARGS="$EXTRA_ARGS -var=hosted_zone_name=$HZ"
+
+          BUDGET_EMAIL="${{ inputs.budget_alert_email }}"
+          [ -z "$BUDGET_EMAIL" ] && BUDGET_EMAIL="${{ secrets.BUDGET_ALERT_EMAIL }}"
+          [ -n "$BUDGET_EMAIL" ] && EXTRA_ARGS="$EXTRA_ARGS -var=budget_alert_email=$BUDGET_EMAIL"
+
+          terraform apply \
+            $EXTRA_ARGS \
+            -auto-approve \
+            -no-color
+
+      - name: Print outputs
+        run: terraform output

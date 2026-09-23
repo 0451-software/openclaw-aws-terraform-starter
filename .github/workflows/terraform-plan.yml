@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   plan:
-    uses: 0451-software/reusable-workflows/.github/workflows/terraform-plan.yml@v1
+    uses: ./.github/workflows/_reusable-terraform-plan.yml
     with:
       working_directory: terraform
       project_name: ${{ vars.PROJECT_NAME || 'openclaw' }}

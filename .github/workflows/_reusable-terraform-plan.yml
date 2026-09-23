@@ -1,0 +1,361 @@
+# VENDORED COPY of 0451-software/reusable-workflows/.github/workflows/terraform-plan.yml@v1
+# Source SHA at vendoring time: 3ae595435ed80af1bc44bf654189fc66d4e50b28
+#
+# This file is a vendored snapshot of the upstream reusable workflow. It was copied into
+# the caller repo because 0451-software/reusable-workflows is PRIVATE, and this caller
+# repo (openclaw-aws-terraform-starter) is PUBLIC. GitHub Actions does not let a public
+# caller resolve a reusable workflow hosted in a private repo; the run schedules 0 jobs
+# and fails with "workflow was not found". Vendoring into the public repo own
+# .github/workflows/ tree and calling it via uses: ./.github/workflows/_reusable-terraform-plan.yml
+# resolves this cleanly.
+#
+# When reusable-workflows upstream changes, re-vendor by copying the new version and
+# bumping the source SHA note above.
+# Terraform Plan (Reusable).
+#
+# Design contract: docs/design/reusable-workflow-api.md §2.3.1.
+#
+# Run `terraform fmt -check`, `terraform init -backend`, `terraform validate`,
+# and `terraform plan`, parse the resource changes, and post a summary
+# comment back to the PR. Callers pin at a tag (`@v1`) or a specific
+# `@v1.x.y`; @main is forbidden by §1.2.
+#
+# Caller wiring (see docs/design/reusable-workflow-api.md §2.3.1 for the
+# full example):
+#
+#   jobs:
+#     plan:
+#       uses: 0451-software/reusable-workflows/.github/workflows/terraform-plan.yml@v1
+#       with:
+#         working_directory: terraform
+#         terraform_version: "~1.6"
+#         project_name: my-app
+#         environment: staging
+#       secrets:
+#         AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+#         AWS_REGION: ${{ secrets.AWS_REGION }}
+#         # ORG_PAT, NAME_SUFFIX, OPENCLAW_DOMAIN, HOSTED_ZONE_NAME,
+#         # EC2_KEY_NAME, OPERATOR_IP, BUDGET_ALERT_EMAIL are optional
+#         # and may be omitted entirely (declared required: false below).
+
+name: Terraform Plan (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: Directory containing Terraform configuration.
+        type: string
+        default: "terraform"
+      terraform_version:
+        description: Terraform version constraint (passed to setup-terraform).
+        type: string
+        default: "~1.6"
+      project_name:
+        description: Project name passed as terraform var (project_name).
+        type: string
+        default: "openclaw"
+      aws_region_default:
+        description: Default AWS region if AWS_REGION secret is not set.
+        type: string
+        default: "us-east-2"
+      name_suffix_placeholder:
+        description: Placeholder string in main.tf to replace with resource_name_suffix.
+        type: string
+        default: "YOURSUFFIX"
+      project_name_placeholder:
+        description: Placeholder string in main.tf to replace with project_name.
+        type: string
+        default: "YOURPROJECTNAME"
+      resource_name_suffix:
+        description: |
+          Unique suffix for globally unique resource names (S3 buckets, etc.).
+          Falls back to the NAME_SUFFIX org secret.
+        type: string
+        default: ""
+      app_subdomain:
+        description: Primary domain/subdomain for this app (e.g. garrettsutula.com).
+        type: string
+        default: ""
+      hosted_zone_name:
+        description: Route53 hosted zone name (e.g. garrettsutula.com).
+        type: string
+        default: ""
+      operator_ip:
+        description: Operator IP address for security group rules. Falls back to OPERATOR_IP secret.
+        type: string
+        default: ""
+      ec2_key_name:
+        description: EC2 key pair name. Falls back to EC2_KEY_NAME secret.
+        type: string
+        default: ""
+      budget_alert_email:
+        description: Email address for AWS budget alerts. Falls back to BUDGET_ALERT_EMAIL secret.
+        type: string
+        default: ""
+      backend_bucket:
+        description: Override S3 backend bucket (passed as -backend-config).
+        type: string
+        default: ""
+
+    # Secrets are declared by name per §1.7. Only AWS_ROLE_ARN is required;
+    # every other secret has a sensible input-default fallback or is fully
+    # optional. `secrets: inherit` is intentionally NOT used so a caller
+    # can audit which secrets this workflow actually reads (audit §7.6).
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+        description: OIDC role ARN for AWS access (aws-actions/configure-aws-credentials).
+      AWS_REGION:
+        required: false
+        description: AWS region; falls back to inputs.aws_region_default.
+      ORG_PAT:
+        required: false
+        description: GitHub PAT for cloning private Terraform modules.
+      NAME_SUFFIX:
+        required: false
+        description: Default for inputs.resource_name_suffix.
+      OPERATOR_IP:
+        required: false
+        description: Default for inputs.operator_ip.
+      EC2_KEY_NAME:
+        required: false
+        description: Default for inputs.ec2_key_name.
+      OPENCLAW_DOMAIN:
+        required: false
+        description: Default for inputs.app_subdomain.
+      HOSTED_ZONE_NAME:
+        required: false
+        description: Default for inputs.hosted_zone_name.
+      BUDGET_ALERT_EMAIL:
+        required: false
+        description: Default for inputs.budget_alert_email.
+
+# `contents: read` baseline; `pull-requests: write` to post the plan
+# comment; `id-token: write` for the AWS OIDC token exchange.
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  plan:
+    name: terraform plan
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION || inputs.aws_region_default }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Substitute backend name_suffix
+        run: |
+          SUFFIX="${{ inputs.resource_name_suffix }}"
+          if [ -z "$SUFFIX" ]; then SUFFIX="${{ secrets.NAME_SUFFIX }}"; fi
+          if [ -n "$SUFFIX" ]; then
+            sed -i "s/${{ inputs.name_suffix_placeholder }}/${SUFFIX}/g" main.tf
+          fi
+
+      - name: Substitute backend project_name
+        run: |
+          PLACEHOLDER="${{ inputs.project_name_placeholder }}"
+          PROJECT="${{ inputs.project_name }}"
+          if [ -n "$PLACEHOLDER" ] && [ -n "$PROJECT" ]; then
+            sed -i "s/${PLACEHOLDER}/${PROJECT}/g" main.tf
+          fi
+
+      - name: Configure git credentials for private modules
+        run: |
+          git config --global url."https://oauth2:${{ secrets.ORG_PAT }}@github.com".insteadOf "https://github.com"
+
+      - name: Terraform fmt -check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        id: init
+        run: |
+          BUCKET="${{ inputs.backend_bucket }}"
+          if [ -n "$BUCKET" ]; then
+            terraform init -backend-config="bucket=$BUCKET"
+          else
+            terraform init
+          fi
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          EXTRA_ARGS=""
+
+          OPERATOR_IP="${{ inputs.operator_ip }}"
+          [ -z "$OPERATOR_IP" ] && OPERATOR_IP="${{ secrets.OPERATOR_IP }}"
+          [ -n "$OPERATOR_IP" ] && EXTRA_ARGS="$EXTRA_ARGS -var=my_ip=$OPERATOR_IP"
+
+          [ -n "${{ inputs.project_name }}" ] && EXTRA_ARGS="$EXTRA_ARGS -var=project_name=${{ inputs.project_name }}"
+
+          SUFFIX="${{ inputs.resource_name_suffix }}"
+          [ -z "$SUFFIX" ] && SUFFIX="${{ secrets.NAME_SUFFIX }}"
+          [ -n "$SUFFIX" ] && EXTRA_ARGS="$EXTRA_ARGS -var=name_suffix=$SUFFIX"
+
+          EC2_KEY="${{ inputs.ec2_key_name }}"
+          [ -z "$EC2_KEY" ] && EC2_KEY="${{ secrets.EC2_KEY_NAME }}"
+          [ -n "$EC2_KEY" ] && EXTRA_ARGS="$EXTRA_ARGS -var=key_name=$EC2_KEY"
+
+          DOMAIN="${{ inputs.app_subdomain }}"
+          [ -z "$DOMAIN" ] && DOMAIN="${{ secrets.OPENCLAW_DOMAIN }}"
+          [ -n "$DOMAIN" ] && EXTRA_ARGS="$EXTRA_ARGS -var=domain=$DOMAIN"
+
+          HZ="${{ inputs.hosted_zone_name }}"
+          [ -z "$HZ" ] && HZ="${{ secrets.HOSTED_ZONE_NAME }}"
+          [ -n "$HZ" ] && EXTRA_ARGS="$EXTRA_ARGS -var=hosted_zone_name=$HZ"
+
+          BUDGET_EMAIL="${{ inputs.budget_alert_email }}"
+          [ -z "$BUDGET_EMAIL" ] && BUDGET_EMAIL="${{ secrets.BUDGET_ALERT_EMAIL }}"
+          [ -n "$BUDGET_EMAIL" ] && EXTRA_ARGS="$EXTRA_ARGS -var=budget_alert_email=$BUDGET_EMAIL"
+
+          terraform plan \
+            $EXTRA_ARGS \
+            -out=tfplan
+
+          terraform show -no-color tfplan > plan.txt
+
+      - name: Parse resource changes
+        id: changes
+        if: always()
+        run: |
+          touch changes.txt
+          if [ -f tfplan ]; then
+            terraform show -json tfplan > plan.json 2>&1 || true
+
+            # Extract changes using ASCII action labels (avoid emoji in jq source)
+            jq -r '
+              (.resource_changes // [])[] |
+              select(.change.actions | any(. != "no-op")) |
+              . as $r |
+              (
+                if   ($r.change.actions | any(. == "create")) and ($r.change.actions | any(. == "delete")) then "REPLACE"
+                elif  $r.change.actions | any(. == "create")  then "CREATE"
+                elif  $r.change.actions | any(. == "delete")  then "DELETE"
+                else "UPDATE"
+                end
+              ) as $action |
+              ($r.change.before // {}) as $before |
+              ($r.change.after  // {}) as $after |
+              (
+                [ $after  | keys[] | select(. as $k | ($before[$k] != $after[$k]))  | "+\(.)" ] +
+                [ $before | keys[] | select(. as $k | ($after[$k]  == null))        | "-\(.)" ]
+              ) | join(", ") as $props |
+              "\($action)|\($r.type)|\($r.name)|\(if $props == "" then "_\u2014_" else "`\($props)`" end)"
+            ' plan.json > changes_raw.txt
+
+            # Map ASCII labels to emoji and format as table rows
+            while IFS='|' read -r action type name props; do
+              case "$action" in
+                CREATE)  label="new"     ; icon="✨ New"     ;;
+                DELETE)  label="destroy" ; icon="💣 Destroy" ;;
+                REPLACE) label="replace" ; icon="💣✨ Replace" ;;
+                UPDATE)  label="update"  ; icon="✏️ Update"  ;;
+                *)       continue ;;
+              esac
+              echo "${label}|${icon} | \`${type}\` | \`${name}\` | ${props}"
+            done < changes_raw.txt > changes.txt
+          fi
+
+          NEW=$(grep -c    "^new|"     changes.txt 2>/dev/null || true); NEW=${NEW:-0}
+          UPDATE=$(grep -c "^update|"  changes.txt 2>/dev/null || true); UPDATE=${UPDATE:-0}
+          DESTROY_RAW=$(grep -c "^destroy|" changes.txt 2>/dev/null || true)
+          REPLACE_RAW=$(grep -c "^replace|" changes.txt 2>/dev/null || true)
+          DESTROY=$(( ${DESTROY_RAW:-0} + ${REPLACE_RAW:-0} ))
+          echo "new=${NEW}"      >> $GITHUB_OUTPUT
+          echo "update=${UPDATE}"   >> $GITHUB_OUTPUT
+          echo "destroy=${DESTROY}" >> $GITHUB_OUTPUT
+
+          # Strip the label prefix and wrap in table pipe format
+          TABLE=$(sed 's/^[^|]*|//' changes.txt | awk '{print "| " $0 " |"}')
+          echo "table<<ENDOFTABLE" >> $GITHUB_OUTPUT
+          echo "$TABLE" >> $GITHUB_OUTPUT
+          echo "ENDOFTABLE" >> $GITHUB_OUTPUT
+
+      - name: Post plan as PR comment
+        if: github.event_name == 'pull_request'
+        # `workflow_call` invocations that arrive from a `push` to main
+        # (e.g. the selftest's `clean-project` job) do not have a
+        # `context.issue.number` to comment on. The step is gated on
+        # the event name so selftest runs do not produce a missing-
+        # number error from the GitHub API; production plan runs on
+        # PRs always have an issue number.
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const init     = '${{ steps.init.outcome }}';
+            const validate = '${{ steps.validate.outcome }}';
+            const plan     = '${{ steps.plan.outcome }}';
+            const newCount     = '${{ steps.changes.outputs.new }}';
+            const updateCount  = '${{ steps.changes.outputs.update }}';
+            const destroyCount = '${{ steps.changes.outputs.destroy }}';
+            const tableRows    = ${{ toJSON(steps.changes.outputs.table) }};
+
+            const statusLine = plan === 'success'
+              ? `✅ Plan succeeded — ✨ ${newCount} new · ✏️ ${updateCount} updated · 💣 ${destroyCount} destroyed`
+              : `❌ Plan failed`;
+
+            const changesTable = tableRows.trim()
+              ? [
+                  '## Resource Changes',
+                  '',
+                  '| Change | Type | Name | Properties |',
+                  '|--------|------|------|------------|',
+                  tableRows,
+                ].join('\n')
+              : '_No resource changes._';
+
+            const planOutput = require('fs').existsSync('${{ inputs.working_directory }}/plan.txt')
+              ? require('fs').readFileSync('${{ inputs.working_directory }}/plan.txt', 'utf8').slice(0, 60000)
+              : '_(plan output not available)_';
+
+            const body = [
+              '## Terraform Plan',
+              '',
+              `| Step | Result |`,
+              `|------|--------|`,
+              `| Init | ${init === 'success' ? '✅' : '❌'} ${init} |`,
+              `| Validate | ${validate === 'success' ? '✅' : '❌'} ${validate} |`,
+              `| Plan | ${plan === 'success' ? '✅' : '❌'} ${plan} |`,
+              '',
+              statusLine,
+              '',
+              changesTable,
+              '',
+              '<details><summary>Full plan output</summary>',
+              '',
+              '```',
+              planOutput,
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
